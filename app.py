@@ -273,24 +273,26 @@ if not st.session_state.gmail_service:
                 "matches EXACTLY what's in GCP → Credentials → Authorised redirect URIs"
             )
 
-        # Google-style sign-in button
-        st.markdown(
-            f"""
-            <div style='text-align:center; margin-top:8px;'>
-              <button onclick="window.location.href='{auth_url}'"
-                 style="display:inline-flex;align-items:center;gap:10px;
-                        background:#fff;color:#3c4043;border:1px solid #dadce0;
-                        border-radius:4px;padding:10px 24px;font-size:14px;
-                        font-weight:500;cursor:pointer;
-                        box-shadow:0 1px 3px rgba(0,0,0,0.1);">
-                <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg"
-                     width="20" height="20"/>
-                Sign in with Google
-              </button>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        # Google-style sign-in button — must use st.components.v1.html
+                # so JavaScript executes. st.markdown sandboxes JS and blocks it.
+                import streamlit.components.v1 as components
+                components.html(
+                    f"""
+                    <div style='text-align:center; margin-top:8px; font-family:sans-serif;'>
+                      <button onclick="window.parent.location.href='{auth_url}'"
+                         style="display:inline-flex;align-items:center;gap:10px;
+                                background:#fff;color:#3c4043;border:1px solid #dadce0;
+                                border-radius:4px;padding:10px 24px;font-size:14px;
+                                font-weight:500;cursor:pointer;
+                                box-shadow:0 1px 3px rgba(0,0,0,0.1);">
+                        <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg"
+                             width="20" height="20"/>
+                        Sign in with Google
+                      </button>
+                    </div>
+                    """,
+                    height=70,
+                )
 
         st.markdown(
             "<p style='text-align:center;color:#94a3b8;font-size:12px;margin-top:20px;'>"
