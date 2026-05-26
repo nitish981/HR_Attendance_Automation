@@ -140,35 +140,57 @@ def _get_user_info(creds):
     return info.get("email", ""), info.get("name", "HR User")
 
 
-def _handle_oauth_callback():
-    """If Google redirected back with ?code=..., exchange it for credentials."""
-    code = st.query_params.get("code")
-    if not code:
-        return False
-    try:
-        flow = _make_flow()
-        flow.fetch_token(code=code)
-        creds = flow.credentials
-
-        email, name = _get_user_info(creds)
-        st.session_state.gmail_service = gbuild("gmail", "v1", credentials=creds)
-        st.session_state.hr_email      = email
-        st.session_state.hr_name       = name
-
-        st.query_params.clear()
-        return True
-    except Exception as e:
-        st.error(f"Sign-in failed: {e}")
-        return False
-
 
 # ──────────────────────────────────────────────────────────
 # HANDLE OAUTH CALLBACK FIRST (before any UI)
+# Catches both ?code= (success) and ?error= (Google blocked it)
 # ──────────────────────────────────────────────────────────
 
-if "code" in st.query_params:
-    _handle_oauth_callback()
-    st.rerun()
+params = st.query_params.to_dict()
+
+# Google returned an error — show it clearly instead of a blank 403
+if "error" in params:
+    err       = params.get("error", "unknown")
+    err_desc  = params.get("error_description", "No description provided by Google.")
+    st.error(f"**Google sign-in error:** `{err}`")
+    st.warning(f"**Details:** {err_desc}")
+    st.info(
+        "Common fixes:\n"
+        "- `access_denied` → your email is not added as a test user in GCP → "
+        "Audience → Add test user\n"
+        "- `redirect_uri_mismatch` → the Redirect URI in GCP Credentials does not "
+        "match REDIRECT_URI in Streamlit secrets exactly\n"
+        "- `invalid_client` → wrong Client ID or Secret in Streamlit secrets"
+    )
+    # Show raw params for diagnosis
+    with st.expander("🔍 Raw URL parameters (for diagnosis)"):
+        st.json(params)
+    if st.button("Clear error and try again"):
+        st.query_params.clear()
+        st.rerun()
+    st.stop()
+
+# Google returned a code — exchange it for credentials
+if "code" in params:
+    with st.spinner("Completing sign-in..."):
+        try:
+            flow = _make_flow()
+            flow.fetch_token(code=params["code"])
+            creds = flow.credentials
+            email, name = _get_user_info(creds)
+            st.session_state.gmail_service = gbuild("gmail", "v1", credentials=creds)
+            st.session_state.hr_email      = email
+            st.session_state.hr_name       = name
+            st.query_params.clear()
+            st.rerun()
+        except Exception as e:
+            st.error(f"**Token exchange failed:** {e}")
+            with st.expander("🔍 Raw URL parameters (for diagnosis)"):
+                st.json(params)
+            if st.button("Clear and try again"):
+                st.query_params.clear()
+                st.rerun()
+            st.stop()
 
 
 # ──────────────────────────────────────────────────────────
@@ -176,6 +198,24 @@ if "code" in st.query_params:
 # ──────────────────────────────────────────────────────────
 
 if not st.session_state.gmail_service:
+
+    # ── Diagnostics panel (always visible on login screen) ──
+    with st.expander("🔍 Diagnostics — click here if sign-in isn't working"):
+        st.markdown("**Secrets loaded:**")
+        st.json({
+            "GT_USERNAME":          GT_USERNAME or "❌ MISSING",
+            "GT_DOMAIN":            GT_DOMAIN   or "❌ MISSING",
+            "GOOGLE_CLIENT_ID":     (CLIENT_ID[:12] + "...") if CLIENT_ID else "❌ MISSING",
+            "GOOGLE_CLIENT_SECRET": "✅ set" if CLIENT_SECRET else "❌ MISSING",
+            "REDIRECT_URI":         REDIRECT_URI or "❌ MISSING",
+        })
+        st.markdown("**Current URL params:**")
+        st.json(params if params else {"note": "no params — normal on first load"})
+        st.markdown(
+            "**Redirect URI must match EXACTLY in both places:**\n"
+            f"- Streamlit secret: `{REDIRECT_URI}`\n"
+            "- Google Cloud → Credentials → OAuth Client → Authorised redirect URIs"
+        )
 
     # centre the login card
     _, mid, _ = st.columns([1, 1.4, 1])
@@ -199,16 +239,16 @@ if not st.session_state.gmail_service:
 
         # Build auth URL and show the button
         try:
-            flow     = _make_flow()
+            flow        = _make_flow()
             auth_url, _ = flow.authorization_url(
-                prompt="select_account",   # always show account picker
+                prompt="select_account",
                 access_type="offline",
             )
         except Exception as e:
             st.error(f"Could not build sign-in URL: {e}")
             st.stop()
 
-        # Google-style sign-in button via markdown link
+        # Google-style sign-in button
         st.markdown(
             f"""
             <div style='text-align:center; margin-top:8px;'>
