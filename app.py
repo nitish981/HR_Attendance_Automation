@@ -118,6 +118,10 @@ for k, v in DEFAULTS.items():
 # ──────────────────────────────────────────────────────────
 
 def _make_flow():
+    # autogenerate_code_verifier=False disables PKCE completely.
+    # PKCE generates a new random verifier each time _make_flow() is called;
+    # since Streamlit calls it twice (build URL + handle callback), the
+    # verifiers don't match and Google returns 403 with no account picker.
     flow = Flow.from_client_config(
         {
             "web": {
@@ -130,10 +134,8 @@ def _make_flow():
         },
         scopes=SCOPES,
         redirect_uri=REDIRECT_URI,
+        autogenerate_code_verifier=False,   # ← disables PKCE
     )
-    # Disable PKCE — auto-added by the library but breaks web app
-    # OAuth when Streamlit receives the redirect callback.
-    flow.code_verifier = None
     return flow
 
 
