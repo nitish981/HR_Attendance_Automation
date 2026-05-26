@@ -186,8 +186,8 @@ if "code" in params:
             callback_url = REDIRECT_URI + "?" + urllib.parse.urlencode(params)
 
             flow = _make_flow()
-            # fetch_token with the full authorization response URL
-            # avoids PKCE / state mismatch issues
+            if hasattr(flow, '_state') and st.session_state.get("_oauth_state"):
+                flow.state = st.session_state._oauth_state  # restore state for validation
             flow.fetch_token(
                 authorization_response=callback_url,
             )
@@ -255,11 +255,12 @@ if not st.session_state.gmail_service:
         # Build auth URL — no PKCE, standard web flow
         try:
             flow        = _make_flow()
-            auth_url, _ = flow.authorization_url(
+            auth_url, state = flow.authorization_url(
                 prompt="select_account",
                 access_type="offline",
                 include_granted_scopes="true",
             )
+            st.session_state._oauth_state = state  # persist state across Streamlit reruns
         except Exception as e:
             st.error(f"Could not build sign-in URL: {e}")
             st.stop()
