@@ -237,7 +237,7 @@ if not st.session_state.gmail_service:
             )
             st.stop()
 
-        # Build auth URL and show the button
+        # Build auth URL
         try:
             flow        = _make_flow()
             auth_url, _ = flow.authorization_url(
@@ -247,6 +247,14 @@ if not st.session_state.gmail_service:
         except Exception as e:
             st.error(f"Could not build sign-in URL: {e}")
             st.stop()
+
+        # Show the full auth URL in diagnostics so we can inspect it
+        with st.expander("🔗 Inspect the Google auth URL (share this if still broken)"):
+            st.code(auth_url, language=None)
+            st.caption(
+                "Check that the `redirect_uri` parameter inside this URL "
+                "matches EXACTLY what's in GCP → Credentials → Authorised redirect URIs"
+            )
 
         # Google-style sign-in button
         st.markdown(
@@ -263,6 +271,9 @@ if not st.session_state.gmail_service:
                 Sign in with Google
               </a>
             </div>
+            <p style="text-align:center;margin-top:12px;font-size:12px;color:#64748b;">
+              Or copy the URL above and open it manually in a new tab
+            </p>
             """,
             unsafe_allow_html=True,
         )
