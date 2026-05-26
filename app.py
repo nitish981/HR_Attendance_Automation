@@ -277,20 +277,17 @@ if not st.session_state.gmail_service:
         st.markdown(
             f"""
             <div style='text-align:center; margin-top:8px;'>
-              <a href="{auth_url}" target="_self"
+              <button onclick="window.location.href='{auth_url}'"
                  style="display:inline-flex;align-items:center;gap:10px;
                         background:#fff;color:#3c4043;border:1px solid #dadce0;
                         border-radius:4px;padding:10px 24px;font-size:14px;
-                        font-weight:500;text-decoration:none;
+                        font-weight:500;cursor:pointer;
                         box-shadow:0 1px 3px rgba(0,0,0,0.1);">
                 <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg"
                      width="20" height="20"/>
                 Sign in with Google
-              </a>
+              </button>
             </div>
-            <p style="text-align:center;margin-top:12px;font-size:12px;color:#64748b;">
-              Or copy the URL above and open it manually in a new tab
-            </p>
             """,
             unsafe_allow_html=True,
         )
