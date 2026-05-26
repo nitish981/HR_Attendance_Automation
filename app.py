@@ -118,7 +118,7 @@ for k, v in DEFAULTS.items():
 # ──────────────────────────────────────────────────────────
 
 def _make_flow():
-    return Flow.from_client_config(
+    flow = Flow.from_client_config(
         {
             "web": {
                 "client_id":     CLIENT_ID,
@@ -131,6 +131,10 @@ def _make_flow():
         scopes=SCOPES,
         redirect_uri=REDIRECT_URI,
     )
+    # Disable PKCE — auto-added by the library but breaks web app
+    # OAuth when Streamlit receives the redirect callback.
+    flow.code_verifier = None
+    return flow
 
 
 def _get_user_info(creds):
@@ -174,8 +178,17 @@ if "error" in params:
 if "code" in params:
     with st.spinner("Completing sign-in..."):
         try:
+            # Reconstruct the full callback URL so fetch_token can
+            # validate the state param correctly
+            import urllib.parse
+            callback_url = REDIRECT_URI + "?" + urllib.parse.urlencode(params)
+
             flow = _make_flow()
-            flow.fetch_token(code=params["code"])
+            # fetch_token with the full authorization response URL
+            # avoids PKCE / state mismatch issues
+            flow.fetch_token(
+                authorization_response=callback_url,
+            )
             creds = flow.credentials
             email, name = _get_user_info(creds)
             st.session_state.gmail_service = gbuild("gmail", "v1", credentials=creds)
@@ -237,12 +250,13 @@ if not st.session_state.gmail_service:
             )
             st.stop()
 
-        # Build auth URL
+        # Build auth URL — no PKCE, standard web flow
         try:
             flow        = _make_flow()
             auth_url, _ = flow.authorization_url(
                 prompt="select_account",
                 access_type="offline",
+                include_granted_scopes="true",
             )
         except Exception as e:
             st.error(f"Could not build sign-in URL: {e}")
