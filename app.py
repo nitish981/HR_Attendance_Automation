@@ -86,7 +86,7 @@ GT_PASSWORD    = _secret("GT_PASSWORD")
 GT_DOMAIN      = _secret("GT_DOMAIN")
 CLIENT_ID      = _secret("GOOGLE_CLIENT_ID")
 CLIENT_SECRET  = _secret("GOOGLE_CLIENT_SECRET")
-REDIRECT_URI   = _secret("REDIRECT_URI", "http://localhost:8501")
+REDIRECT_URI   = _secret("REDIRECT_URI")
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.send",
