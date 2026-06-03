@@ -281,6 +281,12 @@ def is_late(row, grace_minutes=0, fixed_cutoff=None):
 # ══════════════════════════════════════════════════════════
 
 def is_under_hours(row, required_minutes=510):
+    """
+    Check if an employee worked less than the required hours on this day.
+    required_minutes: 510 = 8 hours 30 minutes.
+    Same skip rules as lateness + must have at least one P session.
+    Returns (is_short: bool, short_by_minutes: int)
+    """
     if not _should_count_day(row):
         return False, 0
 
@@ -299,6 +305,7 @@ def is_under_hours(row, required_minutes=510):
     if short_by > 0:
         return True, short_by
     return False, 0
+
 
 # ══════════════════════════════════════════════════════════
 # PARALLEL WORKER  — fetches categories + muster per employee
