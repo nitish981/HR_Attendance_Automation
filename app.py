@@ -231,6 +231,14 @@ with st.sidebar.expander("2. Period & late rule", expanded=True):
 
     workers = st.slider("Parallel threads", 1, 20, 10)
 
+    st.markdown("---")
+    st.markdown("**Minimum daily work hours:**")
+    req_hours = st.slider("Required hours", min_value=dt.time(4, 0),
+                          max_value=dt.time(12, 0), value=dt.time(8, 30),
+                          step=dt.timedelta(minutes=15), format="HH:mm")
+    required_minutes = req_hours.hour * 60 + req_hours.minute
+    st.caption(f"📐 Under-hours if worked < **{req_hours.strftime('%H:%M')}**")
+
 fetch_clicked = st.sidebar.button("🔄 Fetch late-comers", type="primary",
                                   use_container_width=True,
                                   disabled=not (GT_USERNAME and GT_PASSWORD and GT_DOMAIN))
@@ -250,6 +258,7 @@ if fetch_clicked:
                 username=GT_USERNAME, password=GT_PASSWORD, domain=GT_DOMAIN,
                 start_date=str(date_from), end_date=str(date_to),
                 grace_minutes=int(grace_minutes), fixed_cutoff=fixed_cutoff,
+                required_minutes=int(required_minutes),
                 max_workers=int(workers), progress_cb=_cb,
             )
         st.session_state.result   = result
@@ -264,241 +273,305 @@ if fetch_clicked:
         prog.empty(); st.sidebar.error(f"Fetch failed: {e}")
 
 
+
 # ──────────────────────────────────────────────────────────
 # MAIN
 # ──────────────────────────────────────────────────────────
 
-st.title("⏰ Late-Comer Warning Dashboard")
-st.caption("Review late arrivals, filter, pick who gets a warning, send emails.")
+st.title("⏰ HR Attendance Dashboard")
 
 result = st.session_state.result
 if result is None:
     st.info("👈 Pick a month and date range, then click **Fetch late-comers**.")
     st.stop()
 
-month_label   = f"{result['start']} to {result['end']}"
-all_employees = result["employees"]
-if not all_employees:
-    st.success("🎉 No late-comers found — everyone was on time!"); st.stop()
+month_label     = f"{result['start']} to {result['end']}"
+all_late        = result["employees"]
+all_under_hours = result.get("under_hours_employees") or []
+
+tab_late, tab_hours = st.tabs([
+    f"⏰ Late-Comers ({len(all_late)})",
+    f"📉 Under-Hours ({len(all_under_hours)})",
+])
 
 
-def _make_df(emp_list):
-    rows = []
-    for e in emp_list:
-        tier = emailer.tier_for(e["late_count"])
-        rows.append({
-            "Employee ID": e["employee_id"], "Emp No": e["employee_no"],
-            "Name": e["employee_name"], "Email": e["employee_email"],
-            "Department": e.get("department") or "",
-            "Designation": e.get("designation") or "",
-            "Location": e.get("location") or "",
-            "Late Days": e["late_count"],
-            "Tier": emailer.TIER_META[tier]["label"], "_tier": tier,
-            "_idx": all_employees.index(e),
-        })
-    return pd.DataFrame(rows)
+# ══════════════════════════════════════════════════════════
+# TAB 1: LATE-COMERS
+# ══════════════════════════════════════════════════════════
 
-df_all = _make_df(all_employees)
-
-
-# ── ① FILTERS ────────────────────────────────────────────
-st.subheader("🔍 Filters")
-
-fc1, fc2, fc3, fc4 = st.columns(4)
-all_depts = result.get("departments") or []
-all_desig = result.get("designations") or []
-all_locs  = result.get("locations") or []
-
-sel_depts = fc1.multiselect("Department", all_depts, default=[], placeholder="All")
-sel_desig = fc2.multiselect("Designation", all_desig, default=[], placeholder="All")
-sel_locs  = fc3.multiselect("Location", all_locs, default=[], placeholder="All")
-exclude   = fc4.checkbox("Exclude selected", value=False)
-
-df = df_all.copy()
-for col, sel in [("Department", sel_depts), ("Designation", sel_desig), ("Location", sel_locs)]:
-    if sel:
-        mask = ~df[col].isin(sel) if exclude else df[col].isin(sel)
-        df = df[mask]
-df = df.reset_index(drop=True)
-
-filtered_employees = [all_employees[i] for i in df["_idx"].tolist()]
-if df.empty:
-    st.warning("No late-comers match filters."); st.stop()
-
-st.divider()
-
-
-# ── ② INSIGHTS ───────────────────────────────────────────
-st.subheader("📊 Insights")
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Late-comers", len(df))
-c2.metric("Total employees", result["all_employees_count"])
-c3.metric("🟢 Normal (1)", int((df["_tier"] == "normal").sum()))
-c4.metric("🟡 Moderate (2)", int((df["_tier"] == "moderate").sum()))
-c5.metric("🔴 Strict (3+)", int((df["_tier"] == "strict").sum()))
-
-ch1, ch2, ch3 = st.columns(3)
-with ch1:
-    st.markdown("**By tier**")
-    st.bar_chart(df["Tier"].value_counts()
-                 .reindex(["Normal Warning","Moderate Warning","Strict Warning"])
-                 .fillna(0).astype(int), color="#4361ee")
-with ch2:
-    st.markdown("**By department**")
-    dc = df["Department"].value_counts().head(10)
-    if not dc.empty and not (len(dc) == 1 and dc.index[0] == ""):
-        st.bar_chart(dc, color="#7209b7")
+with tab_late:
+    if not all_late:
+        st.info("No late-comers found — everyone was on time!")
     else:
-        st.caption("No department data")
-with ch3:
-    st.markdown("**Top late-comers**")
-    st.dataframe(df.sort_values("Late Days", ascending=False).head(8)
-                 [["Name","Department","Late Days","Tier"]], hide_index=True, use_container_width=True)
+        def _make_late_df(emp_list):
+            rows = []
+            for e in emp_list:
+                tier = emailer.tier_for(e["late_count"])
+                rows.append({
+                    "Employee ID": e["employee_id"], "Emp No": e["employee_no"],
+                    "Name": e["employee_name"], "Email": e["employee_email"],
+                    "Department": e.get("department") or "",
+                    "Designation": e.get("designation") or "",
+                    "Late Days": e["late_count"],
+                    "Tier": emailer.TIER_META[tier]["label"], "_tier": tier,
+                    "_idx": all_late.index(e),
+                })
+            return pd.DataFrame(rows)
 
-st.divider()
+        df_all = _make_late_df(all_late)
+
+        # Filters
+        st.subheader("🔍 Filters")
+        fc1, fc2, fc3 = st.columns(3)
+        sel_depts = fc1.multiselect("Department", result.get("departments") or [], [], placeholder="All", key="lt_d")
+        sel_desig = fc2.multiselect("Designation", result.get("designations") or [], [], placeholder="All", key="lt_g")
+        exclude   = fc3.checkbox("Exclude selected", key="lt_x")
+
+        df = df_all.copy()
+        for col, sel in [("Department", sel_depts), ("Designation", sel_desig)]:
+            if sel:
+                mask = ~df[col].isin(sel) if exclude else df[col].isin(sel)
+                df = df[mask]
+        df = df.reset_index(drop=True)
+        filtered_employees = [all_late[i] for i in df["_idx"].tolist()]
+
+        if df.empty:
+            st.warning("No late-comers match filters.")
+        else:
+            # Insights
+            st.divider()
+            st.subheader("📊 Insights")
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Late-comers", len(df))
+            c2.metric("Total employees", result["all_employees_count"])
+            c3.metric("🟢 Normal (1)", int((df["_tier"] == "normal").sum()))
+            c4.metric("🟡 Moderate (2)", int((df["_tier"] == "moderate").sum()))
+            c5.metric("🔴 Strict (3+)", int((df["_tier"] == "strict").sum()))
+
+            ch1, ch2, ch3 = st.columns(3)
+            with ch1:
+                st.markdown("**By tier**")
+                st.bar_chart(df["Tier"].value_counts()
+                             .reindex(["Normal Warning","Moderate Warning","Strict Warning"])
+                             .fillna(0).astype(int), color="#4361ee")
+            with ch2:
+                st.markdown("**By department**")
+                dc = df["Department"].value_counts().head(10)
+                if not dc.empty and not (len(dc)==1 and dc.index[0]==""):
+                    st.bar_chart(dc, color="#7209b7")
+            with ch3:
+                st.markdown("**Top late-comers**")
+                st.dataframe(df.sort_values("Late Days", ascending=False).head(8)
+                             [["Name","Department","Late Days","Tier"]], hide_index=True, use_container_width=True)
+
+            # Late details
+            st.divider()
+            with st.expander("📋 Detailed late-time breakdown"):
+                detail_rows = []
+                for e in filtered_employees:
+                    for d in e["late_days"]:
+                        detail_rows.append({
+                            "Emp No": e["employee_no"], "Name": e["employee_name"],
+                            "Department": e.get("department",""),
+                            "Date": d["date"], "Day": d["day_of_week"],
+                            "Shift Start": d["shift_start"], "In Time": d["in_time"],
+                            "Late By (min)": d["late_by_minutes"],
+                        })
+                if detail_rows:
+                    ddf = pd.DataFrame(detail_rows)
+                    dc1, dc2 = st.columns(2)
+                    emp_f = dc1.multiselect("Employee", sorted(ddf["Name"].unique()), [], placeholder="All", key="det_e")
+                    dept_f = dc2.multiselect("Dept", sorted(d for d in ddf["Department"].unique() if d), [], placeholder="All", key="det_d")
+                    if emp_f:  ddf = ddf[ddf["Name"].isin(emp_f)]
+                    if dept_f: ddf = ddf[ddf["Department"].isin(dept_f)]
+                    st.dataframe(ddf.sort_values(["Name","Date"]), hide_index=True, use_container_width=True)
+                    st.download_button("⬇️ Download", ddf.to_csv(index=False).encode(),
+                                       file_name=f"late_details_{result['period']}.csv", mime="text/csv")
+
+            # Selection + Email
+            st.divider()
+            st.subheader("✅ Select who receives a warning email")
+            sel_df = df.copy(); sel_df.insert(0, "Send", False)
+            sel_df["Has Email"] = sel_df["Email"].str.len() > 0
+
+            qb1, qb2, qb3, qb4, qb5 = st.columns(5)
+            if qb1.button("Select all"):  st.session_state._pre = "all"
+            if qb2.button("🟢 Normal"):   st.session_state._pre = "normal"
+            if qb3.button("🟡 Moderate"): st.session_state._pre = "moderate"
+            if qb4.button("🔴 Strict"):   st.session_state._pre = "strict"
+            if qb5.button("Clear"):       st.session_state._pre = "none"
+
+            pre = st.session_state.get("_pre")
+            if pre == "all":    sel_df["Send"] = sel_df["Has Email"]
+            elif pre in ("normal","moderate","strict"):
+                sel_df["Send"] = (sel_df["_tier"] == pre) & sel_df["Has Email"]
+            elif pre == "none": sel_df["Send"] = False
+
+            edited = st.data_editor(
+                sel_df[["Send","Emp No","Name","Email","Department","Late Days","Tier","Has Email"]],
+                hide_index=True, use_container_width=True,
+                column_config={"Send": st.column_config.CheckboxColumn("Send"),
+                               "Has Email": st.column_config.CheckboxColumn("Has Email", disabled=True)},
+                disabled=["Emp No","Name","Email","Department","Late Days","Tier","Has Email"],
+                key="sel_editor")
+            sel_idx = edited.index[edited["Send"] & edited["Has Email"]].tolist()
+            selected_employees = [all_late[df.iloc[i]["_idx"]] for i in sel_idx]
+            st.info(f"**{len(selected_employees)}** selected.")
+
+            # Templates
+            company = "Growify"; signatory = hr_name; include_table = True
+            with st.expander("✏️ Edit email templates"):
+                company   = st.text_input("Company name", value="Growify")
+                signatory = st.text_input("HR signatory", value=hr_name)
+                include_table = st.checkbox("Include late-days table", value=True)
+                for tk in ("normal","moderate","strict"):
+                    m = emailer.TIER_META[tk]
+                    st.markdown(f"<span class='tier-pill' style='background:{m['color']};'>{m['label']}</span>", unsafe_allow_html=True)
+                    st.session_state.subjects[tk] = st.text_input(f"Subject ({tk})", st.session_state.subjects[tk], key=f"s_{tk}")
+                    st.session_state.bodies[tk]   = st.text_area(f"Body ({tk})", st.session_state.bodies[tk], height=170, key=f"b_{tk}")
+                    st.markdown("---")
+
+            # Preview
+            if selected_employees:
+                with st.expander("👀 Preview"):
+                    names = [e["employee_name"] for e in selected_employees]
+                    pick = st.selectbox("Preview for", range(len(names)), format_func=lambda i: names[i])
+                    emp = selected_employees[pick]
+                    tier, subject, html = emailer.build_email(
+                        emp, month_label, company=company, hr_name=signatory,
+                        subjects=st.session_state.subjects, bodies=st.session_state.bodies, include_table=include_table)
+                    meta = emailer.TIER_META[tier]
+                    st.markdown(f"**From:** {hr_email} → **To:** {emp['employee_email']}  |  "
+                                f"<span class='tier-pill' style='background:{meta['color']};'>{meta['label']}</span>", unsafe_allow_html=True)
+                    st.markdown(f"**Subject:** {subject}")
+                    st.components.v1.html(html, height=380, scrolling=True)
+
+            # Send
+            st.divider()
+            st.subheader("🚀 Send warning emails")
+            st.markdown(f"<div class='info-box'>Emails from <b>{hr_email}</b> via Gmail API.</div>", unsafe_allow_html=True)
+            dry_run = st.checkbox("Dry run", value=True)
+            confirm = st.checkbox(f"I reviewed the {len(selected_employees)} selected.")
+            if st.button("Send", type="primary", disabled=(not selected_employees or not confirm)):
+                send_log = []; prog = st.progress(0.0)
+                for i, emp in enumerate(selected_employees, 1):
+                    tier, subject, html = emailer.build_email(
+                        emp, month_label, company=company, hr_name=signatory,
+                        subjects=st.session_state.subjects, bodies=st.session_state.bodies, include_table=include_table)
+                    row = {"Name": emp["employee_name"], "Email": emp["employee_email"],
+                           "Department": emp.get("department",""), "Tier": emailer.TIER_META[tier]["label"]}
+                    try:
+                        if dry_run: row["Status"] = "DRY RUN"
+                        else:
+                            emailer.send_via_gmail_api(st.session_state.gmail_service,
+                                to_email=emp["employee_email"], subject=subject, html_body=html, from_name=signatory)
+                            row["Status"] = f"✅ Sent"
+                    except Exception as e: row["Status"] = f"❌ {e}"
+                    send_log.append(row); prog.progress(i / len(selected_employees))
+                st.session_state.send_log = send_log
+
+            if st.session_state.send_log:
+                log_df = pd.DataFrame(st.session_state.send_log)
+                st.dataframe(log_df, hide_index=True, use_container_width=True)
+                st.download_button("⬇️ Log", log_df.to_csv(index=False).encode(),
+                                   file_name=f"send_log_{result['period']}.csv", mime="text/csv")
 
 
-# ── ③ LATE DETAILS ────────────────────────────────────────
-with st.expander("📋 Detailed late-time breakdown"):
-    detail_rows = []
-    for e in filtered_employees:
-        for d in e["late_days"]:
-            detail_rows.append({
+# ══════════════════════════════════════════════════════════
+# TAB 2: UNDER-HOURS
+# ══════════════════════════════════════════════════════════
+
+with tab_hours:
+    if not all_under_hours:
+        st.info("Everyone completed their required hours!")
+    else:
+        st.subheader("📉 Employees who didn't complete required daily hours")
+        st.caption(f"Threshold: **{req_hours.strftime('%H:%M')}** per day. "
+                   "Holidays and approved leaves are excluded.")
+
+        # Build dataframe
+        uh_rows = []
+        for e in all_under_hours:
+            uh_rows.append({
                 "Emp No": e["employee_no"], "Name": e["employee_name"],
-                "Department": e.get("department",""), "Designation": e.get("designation",""),
-                "Date": d["date"], "Day": d["day_of_week"],
-                "Shift Start": d["shift_start"], "In Time": d["in_time"],
-                "Late By (min)": d["late_by_minutes"],
+                "Email": e["employee_email"],
+                "Department": e.get("department") or "",
+                "Designation": e.get("designation") or "",
+                "Short Days": e["under_hours_count"],
+                "_idx": all_under_hours.index(e),
             })
-    if detail_rows:
-        ddf = pd.DataFrame(detail_rows)
-        dc1, dc2 = st.columns(2)
-        emp_f  = dc1.multiselect("Filter employee", sorted(ddf["Name"].unique()), [], placeholder="All", key="det_e")
-        dept_f = dc2.multiselect("Filter department", sorted(d for d in ddf["Department"].unique() if d), [], placeholder="All", key="det_d")
-        if emp_f:  ddf = ddf[ddf["Name"].isin(emp_f)]
-        if dept_f: ddf = ddf[ddf["Department"].isin(dept_f)]
-        st.dataframe(ddf.sort_values(["Name","Date"]), hide_index=True, use_container_width=True)
-        st.download_button("⬇️ Download", ddf.to_csv(index=False).encode(),
-                           file_name=f"late_details_{result['period']}.csv", mime="text/csv")
+        uh_df_all = pd.DataFrame(uh_rows)
 
-st.divider()
+        # Filters
+        uf1, uf2, uf3 = st.columns(3)
+        uh_depts = uf1.multiselect("Department", result.get("departments") or [], [], placeholder="All", key="uh_d")
+        uh_desig = uf2.multiselect("Designation", result.get("designations") or [], [], placeholder="All", key="uh_g")
+        uh_excl  = uf3.checkbox("Exclude selected", key="uh_x")
 
+        uh_df = uh_df_all.copy()
+        for col, sel in [("Department", uh_depts), ("Designation", uh_desig)]:
+            if sel:
+                mask = ~uh_df[col].isin(sel) if uh_excl else uh_df[col].isin(sel)
+                uh_df = uh_df[mask]
+        uh_df = uh_df.reset_index(drop=True)
 
-# ── ④ SELECTION TABLE ─────────────────────────────────────
-st.subheader("✅ Select who receives a warning email")
+        if uh_df.empty:
+            st.warning("No under-hours employees match filters.")
+        else:
+            # Metrics
+            st.divider()
+            um1, um2, um3 = st.columns(3)
+            um1.metric("Employees with short days", len(uh_df))
+            um2.metric("Total short days", int(uh_df["Short Days"].sum()))
+            um3.metric("Avg short days / person", f"{uh_df['Short Days'].mean():.1f}")
 
-sel_df = df.copy()
-sel_df.insert(0, "Send", False)
-sel_df["Has Email"] = sel_df["Email"].str.len() > 0
+            # Charts
+            uc1, uc2 = st.columns(2)
+            with uc1:
+                st.markdown("**By department**")
+                ud = uh_df["Department"].value_counts().head(10)
+                if not ud.empty and not (len(ud)==1 and ud.index[0]==""):
+                    st.bar_chart(ud, color="#e8590c")
+            with uc2:
+                st.markdown("**Most under-hours days**")
+                st.dataframe(uh_df.sort_values("Short Days", ascending=False).head(10)
+                             [["Name","Department","Short Days"]], hide_index=True, use_container_width=True)
 
-qb1, qb2, qb3, qb4, qb5 = st.columns(5)
-if qb1.button("Select all"):  st.session_state._pre = "all"
-if qb2.button("🟢 Normal"):   st.session_state._pre = "normal"
-if qb3.button("🟡 Moderate"): st.session_state._pre = "moderate"
-if qb4.button("🔴 Strict"):   st.session_state._pre = "strict"
-if qb5.button("Clear"):       st.session_state._pre = "none"
+            # Summary table
+            st.divider()
+            st.subheader("📋 Employee summary")
+            st.dataframe(uh_df[["Emp No","Name","Email","Department","Designation","Short Days"]]
+                         .sort_values("Short Days", ascending=False),
+                         hide_index=True, use_container_width=True)
 
-pre = st.session_state.get("_pre")
-if pre == "all":    sel_df["Send"] = sel_df["Has Email"]
-elif pre in ("normal","moderate","strict"):
-    sel_df["Send"] = (sel_df["_tier"] == pre) & sel_df["Has Email"]
-elif pre == "none": sel_df["Send"] = False
+            # Day-by-day detail
+            st.divider()
+            with st.expander("📅 Day-by-day under-hours breakdown"):
+                uh_detail = []
+                uh_filtered = [all_under_hours[i] for i in uh_df["_idx"].tolist()]
+                for e in uh_filtered:
+                    for d in e.get("under_hours_days") or []:
+                        sm = d["short_by_minutes"]
+                        uh_detail.append({
+                            "Emp No": e["employee_no"], "Name": e["employee_name"],
+                            "Department": e.get("department",""),
+                            "Date": d["date"], "Day": d["day_of_week"],
+                            "In": d["in_time"], "Out": d["out_time"],
+                            "Worked": d["total_work_hrs"],
+                            "Short By": f"{sm//60}:{sm%60:02d}",
+                            "Short (min)": sm,
+                        })
+                if uh_detail:
+                    uhd = pd.DataFrame(uh_detail)
+                    uf1, uf2 = st.columns(2)
+                    uh_ef = uf1.multiselect("Employee", sorted(uhd["Name"].unique()), [], placeholder="All", key="uhd_e")
+                    uh_df2 = uf2.multiselect("Dept", sorted(d for d in uhd["Department"].unique() if d), [], placeholder="All", key="uhd_d")
+                    if uh_ef:  uhd = uhd[uhd["Name"].isin(uh_ef)]
+                    if uh_df2: uhd = uhd[uhd["Department"].isin(uh_df2)]
+                    st.dataframe(uhd.sort_values(["Name","Date"]), hide_index=True, use_container_width=True)
+                    st.download_button("⬇️ Download", uhd.to_csv(index=False).encode(),
+                                       file_name=f"under_hours_{result['period']}.csv", mime="text/csv")
 
-edited = st.data_editor(
-    sel_df[["Send","Emp No","Name","Email","Department","Designation","Late Days","Tier","Has Email"]],
-    hide_index=True, use_container_width=True,
-    column_config={"Send": st.column_config.CheckboxColumn("Send"),
-                   "Has Email": st.column_config.CheckboxColumn("Has Email", disabled=True)},
-    disabled=["Emp No","Name","Email","Department","Designation","Late Days","Tier","Has Email"],
-    key="sel_editor",
-)
-
-sel_idx = edited.index[edited["Send"] & edited["Has Email"]].tolist()
-selected_employees = [all_employees[df.iloc[i]["_idx"]] for i in sel_idx]
-
-missing = edited[edited["Send"] & ~edited["Has Email"]]
-if not missing.empty:
-    st.warning("No email: " + ", ".join(missing["Name"].tolist()))
-st.info(f"**{len(selected_employees)}** selected.")
-st.divider()
-
-
-# ── ⑤ TEMPLATES ──────────────────────────────────────────
-company = "Growify"; signatory = hr_name; include_table = True
-with st.expander("✏️ Edit email templates"):
-    st.caption("Placeholders: {name} {late_count} {month} {company} {hr_name} {late_days_table}")
-    company   = st.text_input("Company name", value="Growify")
-    signatory = st.text_input("HR signatory", value=hr_name)
-    include_table = st.checkbox("Include late-days table", value=True)
-    for tk in ("normal","moderate","strict"):
-        m = emailer.TIER_META[tk]
-        st.markdown(f"<span class='tier-pill' style='background:{m['color']};'>{m['label']}</span>",
-                    unsafe_allow_html=True)
-        st.session_state.subjects[tk] = st.text_input(f"Subject ({tk})", st.session_state.subjects[tk], key=f"s_{tk}")
-        st.session_state.bodies[tk]   = st.text_area(f"Body ({tk})", st.session_state.bodies[tk], height=170, key=f"b_{tk}")
-        st.markdown("---")
-
-
-# ── ⑥ PREVIEW ────────────────────────────────────────────
-if selected_employees:
-    with st.expander("👀 Preview"):
-        names = [e["employee_name"] for e in selected_employees]
-        pick = st.selectbox("Preview for", range(len(names)), format_func=lambda i: names[i])
-        emp = selected_employees[pick]
-        tier, subject, html = emailer.build_email(
-            emp, month_label, company=company, hr_name=signatory,
-            subjects=st.session_state.subjects, bodies=st.session_state.bodies,
-            include_table=include_table)
-        meta = emailer.TIER_META[tier]
-        st.markdown(f"**From:** {hr_email} → **To:** {emp['employee_email']}  |  "
-                    f"<span class='tier-pill' style='background:{meta['color']};'>{meta['label']}</span>",
-                    unsafe_allow_html=True)
-        st.markdown(f"**Subject:** {subject}")
-        st.components.v1.html(html, height=380, scrolling=True)
-
-
-# ── ⑦ SEND ───────────────────────────────────────────────
-st.subheader("🚀 Send warning emails")
-st.markdown(f"<div class='info-box'>Emails from <b>{hr_email}</b> via Gmail API.</div>",
-            unsafe_allow_html=True)
-
-dry_run = st.checkbox("Dry run", value=True)
-confirm = st.checkbox(f"I have reviewed the {len(selected_employees)} selected employee(s).")
-send_btn = st.button("Send", type="primary", disabled=(not selected_employees or not confirm))
-
-if send_btn:
-    send_log = []; prog = st.progress(0.0)
-    for i, emp in enumerate(selected_employees, 1):
-        tier, subject, html = emailer.build_email(
-            emp, month_label, company=company, hr_name=signatory,
-            subjects=st.session_state.subjects, bodies=st.session_state.bodies,
-            include_table=include_table)
-        row = {"Name": emp["employee_name"], "Email": emp["employee_email"],
-               "Department": emp.get("department",""), "Tier": emailer.TIER_META[tier]["label"]}
-        try:
-            if dry_run:
-                row["Status"] = "DRY RUN"
-            else:
-                emailer.send_via_gmail_api(st.session_state.gmail_service,
-                    to_email=emp["employee_email"], subject=subject,
-                    html_body=html, from_name=signatory)
-                row["Status"] = f"✅ Sent from {hr_email}"
-        except Exception as e:
-            row["Status"] = f"❌ {e}"
-        send_log.append(row); prog.progress(i / len(selected_employees))
-    st.session_state.send_log = send_log
-    ok = sum(1 for r in send_log if r["Status"].startswith("✅"))
-    if dry_run: st.info("Dry run done. Uncheck to send for real.")
-    elif ok == len(send_log): st.success(f"✅ All {ok} emails sent!")
-    else: st.warning(f"Sent {ok}, failed {len(send_log)-ok}.")
-
-if st.session_state.send_log:
-    st.markdown("#### Send log")
-    log_df = pd.DataFrame(st.session_state.send_log)
-    st.dataframe(log_df, hide_index=True, use_container_width=True)
-    st.download_button("⬇️ Log CSV", log_df.to_csv(index=False).encode(),
-                       file_name=f"send_log_{result['period']}.csv", mime="text/csv")
-
-# ── ⑧ EXPORT ─────────────────────────────────────────────
-with st.expander("📄 Full data & export"):
-    st.dataframe(df.drop(columns=["_tier","_idx"]), hide_index=True, use_container_width=True)
+            # Export
+            st.download_button("⬇️ Download summary CSV", uh_df.to_csv(index=False).encode(),
+                               file_name=f"under_hours_summary_{result['period']}.csv", mime="text/csv")
