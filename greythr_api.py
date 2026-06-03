@@ -171,18 +171,36 @@ def _to_minutes(hhmm):
 
 
 # ══════════════════════════════════════════════════════════
-# HALF-DAY CHECK
+# APPROVED HALF-DAY LEAVE CHECK
 # ══════════════════════════════════════════════════════════
 
-def _is_half_day(row):
+def _is_approved_half_day_leave(row):
+    """
+    Returns True ONLY if the employee has an approved half-day leave.
+
+    Approved half-day leave patterns:
+      session1 = leave code (CFL, L, SL, CL, etc.)  +  session2 = P
+      session1 = P  +  session2 = leave code
+
+    NOT excluded:
+      session1=P + session2=A  → came first half, absent second half (still count late)
+      session1=A + session2=P  → absent first half, came second half (still count late)
+    """
     s1 = (row.get("session1_label") or "").strip().upper()
     s2 = (row.get("session2_label") or "").strip().upper()
-    if (s1, s2) in {("P", "A"), ("A", "P")}:
+
+    if not s1 or not s2:
+        return False
+
+    # P and A are attendance markers, everything else is a leave code
+    attendance_codes = {"P", "A", ""}
+
+    # One session is P and the other is a leave code → approved half-day leave
+    if s1 == "P" and s2 not in attendance_codes:
         return True
-    s1h = (row.get("session1h_label") or "").strip().upper()
-    s2h = (row.get("session2h_label") or "").strip().upper()
-    if "HD" in (s1h, s2h):
+    if s2 == "P" and s1 not in attendance_codes:
         return True
+
     return False
 
 
@@ -235,7 +253,7 @@ def is_late(row, grace_minutes=0, fixed_cutoff=None):
         return False, 0
     if row.get("on_leave"):
         return False, 0
-    if _is_half_day(row):
+    if _is_approved_half_day_leave(row):
         return False, 0
 
     in_time_min = _to_minutes(row.get("in_time"))
