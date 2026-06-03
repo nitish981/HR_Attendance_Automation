@@ -171,36 +171,21 @@ def _to_minutes(hhmm):
 
 
 # ══════════════════════════════════════════════════════════
-# APPROVED HALF-DAY LEAVE CHECK
+# LEAVE CHECK — skip only if a leave is actually applied
 # ══════════════════════════════════════════════════════════
 
-def _is_approved_half_day_leave(row):
+def _has_leave_applied(row):
     """
-    Returns True ONLY if the employee has an approved half-day leave.
-
-    Approved half-day leave patterns:
-      session1 = leave code (CFL, L, SL, CL, etc.)  +  session2 = P
-      session1 = P  +  session2 = leave code
-
-    NOT excluded:
-      session1=P + session2=A  → came first half, absent second half (still count late)
-      session1=A + session2=P  → absent first half, came second half (still count late)
+    Returns True if any leave is applied on this day.
+    Leave codes: CFL, L, SL, CL, PL, EL, ML, etc.
+    NOT leave codes: P (present), A (absent), "" (empty)
     """
-    s1 = (row.get("session1_label") or "").strip().upper()
-    s2 = (row.get("session2_label") or "").strip().upper()
+    not_leave = {"P", "A", "H", "WO", ""}
 
-    if not s1 or not s2:
-        return False
-
-    # P and A are attendance markers, everything else is a leave code
-    attendance_codes = {"P", "A", ""}
-
-    # One session is P and the other is a leave code → approved half-day leave
-    if s1 == "P" and s2 not in attendance_codes:
-        return True
-    if s2 == "P" and s1 not in attendance_codes:
-        return True
-
+    for field in ("session1_label", "session2_label"):
+        val = (row.get(field) or "").strip().upper()
+        if val and val not in not_leave:
+            return True
     return False
 
 
@@ -244,16 +229,33 @@ def parse_record(rec, emp_email=""):
 
 
 # ══════════════════════════════════════════════════════════
+# SHARED: should this day be counted for late / under-hours?
+# ══════════════════════════════════════════════════════════
+
+def _should_count_day(row):
+    """
+    Returns True if this day should be counted for late-arrival
+    and under-hours checks.
+
+    Skip: holidays, weekoffs, full-day leave, any applied leave code.
+    Count: P+P, P+A, A+P (no leave applied).
+    """
+    day_type = (row.get("day_type") or "").strip().lower()
+    if day_type in ("holiday", "weekoff", "week off", "weekly off"):
+        return False
+    if row.get("on_leave"):
+        return False
+    if _has_leave_applied(row):
+        return False
+    return True
+
+
+# ══════════════════════════════════════════════════════════
 # LATENESS
 # ══════════════════════════════════════════════════════════
 
 def is_late(row, grace_minutes=0, fixed_cutoff=None):
-    day_type = (row.get("day_type") or "").strip().lower()
-    if day_type in ("holiday", "weekoff", "week off", "weekly off"):
-        return False, 0
-    if row.get("on_leave"):
-        return False, 0
-    if _is_approved_half_day_leave(row):
+    if not _should_count_day(row):
         return False, 0
 
     in_time_min = _to_minutes(row.get("in_time"))
@@ -275,10 +277,35 @@ def is_late(row, grace_minutes=0, fixed_cutoff=None):
 
 
 # ══════════════════════════════════════════════════════════
+# UNDER-HOURS
+# ══════════════════════════════════════════════════════════
+
+def is_under_hours(row, required_minutes=510):
+    """
+    Check if an employee worked less than the required hours on this day.
+    required_minutes: 510 = 8 hours 30 minutes.
+    Same skip rules as lateness.
+    Returns (is_short: bool, short_by_minutes: int)
+    """
+    if not _should_count_day(row):
+        return False, 0
+
+    work_hrs = row.get("total_work_hrs") or "00:00"
+    worked_min = _to_minutes(work_hrs)
+    if worked_min is None:
+        return False, 0
+
+    short_by = required_minutes - worked_min
+    if short_by > 0:
+        return True, short_by
+    return False, 0
+
+
+# ══════════════════════════════════════════════════════════
 # PARALLEL WORKER  — fetches categories + muster per employee
 # ══════════════════════════════════════════════════════════
 
-def _process_employee(token, domain, emp, start, end, grace_minutes, fixed_cutoff):
+def _process_employee(token, domain, emp, start, end, grace_minutes, fixed_cutoff, required_minutes=510):
     session   = make_session(token, domain)
     emp_id    = emp.get("employeeId")
     emp_name  = emp.get("name") or ""
@@ -293,19 +320,25 @@ def _process_employee(token, domain, emp, start, end, grace_minutes, fixed_cutof
     designation = cats["designation"]
     location    = cats["location"]
 
+    base = {
+        "employee_id": emp_id, "employee_no": emp.get("employeeNo") or "",
+        "employee_name": emp_name, "employee_email": emp_email,
+        "department": department, "designation": designation, "location": location,
+    }
+
     # ── Fetch attendance (muster) ──
     data = fetch_muster(session, emp_id, start, end)
     if not data:
-        return {
-            "employee_id": emp_id, "employee_no": emp.get("employeeNo") or "",
-            "employee_name": emp_name, "employee_email": emp_email,
-            "department": department, "designation": designation, "location": location,
-            "late_count": 0, "late_days": [],
-        }
+        return {**base, "late_count": 0, "late_days": [],
+                "under_hours_count": 0, "under_hours_days": []}
 
     late_days = []
+    under_hours_days = []
+
     for rec in (data.get("records") or []):
         row = parse_record(rec, emp_email)
+
+        # Late check
         late, late_by = is_late(row, grace_minutes=grace_minutes, fixed_cutoff=fixed_cutoff)
         if late:
             late_days.append({
@@ -316,16 +349,24 @@ def _process_employee(token, domain, emp, start, end, grace_minutes, fixed_cutof
                 "late_by_minutes": late_by,
             })
 
+        # Under-hours check
+        short, short_by = is_under_hours(row, required_minutes=required_minutes)
+        if short:
+            under_hours_days.append({
+                "date":            row["date"],
+                "day_of_week":     row["day_of_week"],
+                "in_time":         row["in_time"],
+                "out_time":        row["out_time"],
+                "total_work_hrs":  row["total_work_hrs"],
+                "short_by_minutes":short_by,
+            })
+
     return {
-        "employee_id":    emp_id,
-        "employee_no":    emp.get("employeeNo") or "",
-        "employee_name":  emp_name,
-        "employee_email": emp_email,
-        "department":     department,
-        "designation":    designation,
-        "location":       location,
-        "late_count":     len(late_days),
-        "late_days":      late_days,
+        **base,
+        "late_count":        len(late_days),
+        "late_days":         late_days,
+        "under_hours_count": len(under_hours_days),
+        "under_hours_days":  under_hours_days,
     }
 
 
@@ -348,6 +389,7 @@ def get_late_comers_for_range(
     start_date, end_date,
     grace_minutes=0,
     fixed_cutoff=None,
+    required_minutes=510,
     max_workers=10,
     progress_cb=None,
 ):
@@ -360,7 +402,8 @@ def get_late_comers_for_range(
     if not employees:
         return {
             "period": f"{start_date}__{end_date}", "start": start_date, "end": end_date,
-            "employees": [], "all_employees_count": 0,
+            "employees": [], "under_hours_employees": [],
+            "all_employees_count": 0,
             "departments": [], "designations": [], "locations": [],
             "elapsed": time.time() - t0,
         }
@@ -371,7 +414,7 @@ def get_late_comers_for_range(
         futures = {
             pool.submit(
                 _process_employee, token, domain, emp,
-                start_date, end_date, grace_minutes, fixed_cutoff,
+                start_date, end_date, grace_minutes, fixed_cutoff, required_minutes,
             ): emp
             for emp in employees
         }
@@ -388,6 +431,8 @@ def get_late_comers_for_range(
 
     late_comers   = sorted([r for r in results if r["late_count"] > 0],
                            key=lambda r: r["late_count"], reverse=True)
+    under_hours   = sorted([r for r in results if r.get("under_hours_count", 0) > 0],
+                           key=lambda r: r["under_hours_count"], reverse=True)
     all_depts     = sorted({r["department"]  for r in results if r.get("department")})
     all_desigs    = sorted({r["designation"] for r in results if r.get("designation")})
     all_locations = sorted({r["location"]    for r in results if r.get("location")})
@@ -397,6 +442,7 @@ def get_late_comers_for_range(
         "start":               start_date,
         "end":                 end_date,
         "employees":           late_comers,
+        "under_hours_employees": under_hours,
         "all_employees_count": total,
         "departments":         all_depts,
         "designations":        all_desigs,
