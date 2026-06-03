@@ -289,9 +289,10 @@ month_label     = f"{result['start']} to {result['end']}"
 all_late        = result["employees"]
 all_under_hours = result.get("under_hours_employees") or []
 
-tab_late, tab_hours = st.tabs([
+tab_late, tab_hours, tab_combined = st.tabs([
     f"⏰ Late-Comers ({len(all_late)})",
     f"📉 Under-Hours ({len(all_under_hours)})",
+    "🔄 Late vs Hours",
 ])
 
 
@@ -575,3 +576,161 @@ with tab_hours:
             # Export
             st.download_button("⬇️ Download summary CSV", uh_df.to_csv(index=False).encode(),
                                file_name=f"under_hours_summary_{result['period']}.csv", mime="text/csv")
+
+# ══════════════════════════════════════════════════════════
+# TAB 3: LATE vs HOURS — who was late but completed hours?
+# ══════════════════════════════════════════════════════════
+
+with tab_combined:
+    st.subheader("🔄 Late Arrivals vs Work Hours Completion")
+    st.caption(
+        f"For employees who were late: did they still complete **{req_hours.strftime('%H:%M')}** hours? "
+        "This helps HR distinguish between employees who come late but make up time vs those who don't."
+    )
+
+    if not all_late:
+        st.info("No late-comers to analyze.")
+    else:
+        # Cross-reference: for each late employee, check each late date
+        # against their under-hours dates
+        combined_rows = []
+        for emp in all_late:
+            late_dates = {d["date"] for d in emp.get("late_days") or []}
+            under_dates = {d["date"] for d in emp.get("under_hours_days") or []}
+
+            late_and_short   = late_dates & under_dates       # late AND didn't complete hours
+            late_but_ok      = late_dates - under_dates       # late BUT completed hours
+            not_late_short   = under_dates - late_dates       # on time but under-hours
+
+            combined_rows.append({
+                "Emp No":          emp["employee_no"],
+                "Name":            emp["employee_name"],
+                "Email":           emp["employee_email"],
+                "Department":      emp.get("department") or "",
+                "Designation":     emp.get("designation") or "",
+                "Total Late Days": emp["late_count"],
+                "Late + Completed Hrs": len(late_but_ok),
+                "Late + Short Hrs":     len(late_and_short),
+                "On Time + Short Hrs":  len(not_late_short),
+            })
+
+        cdf = pd.DataFrame(combined_rows)
+
+        # Filters
+        cf1, cf2 = st.columns(2)
+        c_depts = cf1.multiselect("Department", result.get("departments") or [],
+                                  [], placeholder="All", key="cb_d")
+        c_excl  = cf2.checkbox("Exclude", key="cb_x")
+        if c_depts:
+            mask = ~cdf["Department"].isin(c_depts) if c_excl else cdf["Department"].isin(c_depts)
+            cdf = cdf[mask].reset_index(drop=True)
+
+        if cdf.empty:
+            st.warning("No data matches filters.")
+        else:
+            # Metrics
+            st.divider()
+            cm1, cm2, cm3, cm4 = st.columns(4)
+            cm1.metric("Late employees", len(cdf))
+            cm2.metric("Late + Completed ✅", int(cdf["Late + Completed Hrs"].sum()),
+                       help="Days they were late but still worked the full required hours")
+            cm3.metric("Late + Short ❌", int(cdf["Late + Short Hrs"].sum()),
+                       help="Days they were late AND didn't complete required hours")
+            cm4.metric("On Time + Short ⚠️", int(cdf["On Time + Short Hrs"].sum()),
+                       help="Days they came on time but still didn't complete hours")
+
+            # Summary table
+            st.divider()
+            st.subheader("📋 Employee-wise breakdown")
+
+            st.dataframe(
+                cdf[["Emp No", "Name", "Department", "Designation",
+                     "Total Late Days", "Late + Completed Hrs",
+                     "Late + Short Hrs", "On Time + Short Hrs"]]
+                .sort_values("Late + Short Hrs", ascending=False),
+                hide_index=True, use_container_width=True,
+                column_config={
+                    "Late + Completed Hrs": st.column_config.NumberColumn("Late + Completed ✅",
+                        help="Came late but made up the time"),
+                    "Late + Short Hrs": st.column_config.NumberColumn("Late + Short ❌",
+                        help="Came late AND didn't complete hours"),
+                    "On Time + Short Hrs": st.column_config.NumberColumn("On Time + Short ⚠️",
+                        help="On time but left early / worked less"),
+                },
+            )
+
+            # Charts
+            st.divider()
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                st.markdown("**Late + Completed vs Late + Short**")
+                chart_data = pd.DataFrame({
+                    "Completed Hours ✅": [int(cdf["Late + Completed Hrs"].sum())],
+                    "Short Hours ❌": [int(cdf["Late + Short Hrs"].sum())],
+                }, index=["Days"])
+                st.bar_chart(chart_data)
+
+            with cc2:
+                st.markdown("**Worst offenders (Late + Short)**")
+                worst = cdf[cdf["Late + Short Hrs"] > 0].sort_values("Late + Short Hrs", ascending=False).head(10)
+                if not worst.empty:
+                    st.dataframe(worst[["Name","Department","Late + Short Hrs"]],
+                                 hide_index=True, use_container_width=True)
+                else:
+                    st.success("No one was both late and under-hours!")
+
+            # Day-by-day detail
+            st.divider()
+            with st.expander("📅 Day-by-day detail (late days with hours status)"):
+                day_detail = []
+                for emp in all_late:
+                    # skip if filtered out
+                    if c_depts:
+                        dept = emp.get("department") or ""
+                        if c_excl and dept in c_depts: continue
+                        if not c_excl and dept not in c_depts: continue
+
+                    under_dates = {d["date"]: d for d in emp.get("under_hours_days") or []}
+
+                    for d in emp.get("late_days") or []:
+                        date_key = d["date"]
+                        under = under_dates.get(date_key)
+                        if under:
+                            worked = under["total_work_hrs"]
+                            short_min = under["short_by_minutes"]
+                            short_str = f"{short_min//60}:{short_min%60:02d}"
+                            status = "❌ Late + Short"
+                        else:
+                            worked = "≥ " + req_hours.strftime("%H:%M")
+                            short_str = "—"
+                            status = "✅ Late + Completed"
+
+                        day_detail.append({
+                            "Emp No":        emp["employee_no"],
+                            "Name":          emp["employee_name"],
+                            "Department":    emp.get("department",""),
+                            "Date":          date_key,
+                            "Day":           d["day_of_week"],
+                            "In Time":       d["in_time"],
+                            "Late By (min)": d["late_by_minutes"],
+                            "Worked":        worked,
+                            "Short By":      short_str,
+                            "Status":        status,
+                        })
+
+                if day_detail:
+                    dd_df = pd.DataFrame(day_detail)
+                    df1, df2, df3 = st.columns(3)
+                    dd_emp  = df1.multiselect("Employee", sorted(dd_df["Name"].unique()), [], placeholder="All", key="dd_e")
+                    dd_dept = df2.multiselect("Dept", sorted(d for d in dd_df["Department"].unique() if d), [], placeholder="All", key="dd_d")
+                    dd_stat = df3.multiselect("Status", ["✅ Late + Completed", "❌ Late + Short"], [], placeholder="All", key="dd_s")
+                    if dd_emp:  dd_df = dd_df[dd_df["Name"].isin(dd_emp)]
+                    if dd_dept: dd_df = dd_df[dd_df["Department"].isin(dd_dept)]
+                    if dd_stat: dd_df = dd_df[dd_df["Status"].isin(dd_stat)]
+                    st.dataframe(dd_df.sort_values(["Name","Date"]), hide_index=True, use_container_width=True)
+                    st.download_button("⬇️ Download", dd_df.to_csv(index=False).encode(),
+                                       file_name=f"late_vs_hours_{result['period']}.csv", mime="text/csv")
+
+            # Export
+            st.download_button("⬇️ Download combined summary", cdf.to_csv(index=False).encode(),
+                               file_name=f"combined_summary_{result['period']}.csv", mime="text/csv")
